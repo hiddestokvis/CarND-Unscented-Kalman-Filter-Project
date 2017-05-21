@@ -80,6 +80,11 @@ UKF::UKF() {
 
 UKF::~UKF() {}
 
+void UKF::NormalizeAngle(double& phi)
+{
+  phi = atan2(sin(phi), cos(phi));
+}
+
 /**
  * @param {MeasurementPackage} meas_package The latest measurement data of
  * either radar or laser.
@@ -92,10 +97,12 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
       float bearing = meas_package.raw_measurements_(1);
       float radial_velocity = meas_package.raw_measurements_(2);
       // Transform to Cartesian coordinates
-      x_(0) = range * cos(bearing);
-      x_(1) = range * sin(bearing);
-      x_(2) = radial_velocity * cos(bearing);
-      x_(3) = radial_velocity * sin(bearing);
+      const float px = range * cos(bearing);
+      const float py = range * sin(bearing);
+      const float vx = radial_velocity * cos(bearing);
+      const float vy = radial_velocity * sin(bearing);
+      const float v = sqrt(vx * vx + vy * vy);
+      x_ << px, py, v, 0, 0;
     }
     if (meas_package.sensor_type_ == MeasurementPackage::LASER) {
       x_(0) = meas_package.raw_measurements_(0);
@@ -160,13 +167,13 @@ void UKF::Prediction(double delta_t) {
 
  // Sigma point prediction
  for (int i = 0; i < 2 * n_aug_ + 1; i += 1) {
-   double px = Xsig_aug_(0, i);
-   double py = Xsig_aug_(1, i);
-   double v = Xsig_aug_(2, i);
-   double yaw = Xsig_aug_(3, i);
-   double yawd = Xsig_aug_(4, i);
-   double nu_a = Xsig_aug_(5, i);
-   double nu_yawdd = Xsig_aug_(6, i);
+   const double px = Xsig_aug_(0, i);
+   const double py = Xsig_aug_(1, i);
+   const double v = Xsig_aug_(2, i);
+   const double yaw = Xsig_aug_(3, i);
+   const double yawd = Xsig_aug_(4, i);
+   const double nu_a = Xsig_aug_(5, i);
+   const double nu_yawdd = Xsig_aug_(6, i);
 
    double px_p, py_p;
    // AVOID DIVISION BY ZERO
@@ -183,7 +190,7 @@ void UKF::Prediction(double delta_t) {
    double yawd_p = yawd;
 
    // ADD NOISE
-   double delta_t_2 = delta_t * delta_t;
+   const double delta_t_2 = delta_t * delta_t;
    px_p = px_p + .5 * delta_t_2 * cos(yaw) * nu_a;
    py_p = py_p + .5 * delta_t_2 * sin(yaw) * nu_a;
    v_p = v_p + delta_t * nu_a;
@@ -204,8 +211,7 @@ void UKF::Prediction(double delta_t) {
  P_.fill(0.0);
  for (int i = 0; i < 2 * n_aug_ + 1; i += 1) {
    VectorXd xdiff = Xsig_pred_.col(i) - x_;
-   while(xdiff(3) > M_PI) xdiff(3) -= 2. * M_PI;
-   while(xdiff(3) < -M_PI) xdiff(3) += 2. * M_PI;
+   NormalizeAngle(xdiff(3));
    P_ = P_ + weights_(i) * xdiff * xdiff.transpose();
  }
 }
@@ -228,7 +234,7 @@ void UKF::UpdateLidar(MeasurementPackage meas_package) {
               0, 1, 0, 0, 0;
 
   MatrixXd R_laser_ = MatrixXd(2, 2);
-  R_laser_ << std_laspx_, 0,
+  R_laser_ << std_laspx_ * std_laspx_, 0,
               0, std_laspy_;
 
   VectorXd z = meas_package.raw_measurements_;
@@ -263,13 +269,18 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
   int n_z_ = 3;
   MatrixXd Zsig = MatrixXd(n_z_, 2 * n_aug_ + 1);
   for (int i = 0; i < 2 * n_aug_ + 1; i += 1) {
-    double px = Xsig_pred_(0, i);
-    double py = Xsig_pred_(1, i);
-    double v = Xsig_pred_(2, i);
-    double yawn = Xsig_pred_(3, i);
+    const double px = Xsig_pred_(0, i);
+    const double py = Xsig_pred_(1, i);
+    const double v = Xsig_pred_(2, i);
+    const double yawn = Xsig_pred_(3, i);
     Zsig(0, i) = sqrt(px * px + py * py);
-    Zsig(1, i) = atan2(py, px);
-    Zsig(2, i) = (px * cos(yawn) * v + py * sin(yawn) * v) / Zsig(0, i);
+    if (fabs(px) < 0.001 and fabs(py) < 0.001) {
+      Zsig(1, i) = atan2(0.001, 0.001);
+      Zsig(2, i) = (0.001 * cos(yawn) * v + 0.001 * sin(yawn) * v) / Zsig(0, i);
+    } else {
+      Zsig(1, i) = atan2(py, px);
+      Zsig(2, i) = (px * cos(yawn) * v + py * sin(yawn) * v) / Zsig(0, i);
+    }
   }
 
   // Calculate mean predict measurement
@@ -281,8 +292,7 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
   S.fill(0.0);
   for (int i = 0; i < 2 * n_aug_ + 1; i += 1) {
     VectorXd z_diff = Zsig.col(i) - z_pred;
-    while (z_diff(1)> M_PI) z_diff(1)-=2.*M_PI;
-    while (z_diff(1)<-M_PI) z_diff(1)+=2.*M_PI;
+    NormalizeAngle(z_diff(1));
     S = S + weights_(i) * z_diff * z_diff.transpose();
   }
 
@@ -298,12 +308,10 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
   Tc.fill(0.0);
   for (int i = 0; i < 2 * n_aug_ + 1; i += 1) {
     VectorXd xdiff = Xsig_pred_.col(i) - x_;
-    while(xdiff(3) > M_PI) xdiff(3) -= 2. * M_PI;
-    while(xdiff(3) < -M_PI) xdiff(3) += 2. * M_PI;
+    NormalizeAngle(xdiff(3));
 
     VectorXd z_diff = Zsig.col(i) - z_pred;
-    while(z_diff(1) > M_PI) z_diff(1) -= 2. * M_PI;
-    while(z_diff(1) < -M_PI) z_diff(1) += 2. * M_PI;
+    NormalizeAngle(z_diff(1));
     Tc = Tc + weights_(i) * xdiff * z_diff.transpose();
   }
 
@@ -313,8 +321,7 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
   // Update state mean and covariance matrix
   VectorXd z = meas_package.raw_measurements_;
   VectorXd z_diff = z - z_pred;
-  while(z_diff(1) > M_PI) z_diff(1) -= 2. * M_PI;
-  while(z_diff(1) < -M_PI) z_diff(1) += 2. * M_PI;
+  NormalizeAngle(z_diff(1));
   x_ = x_ + K * z_diff;
   P_ = P_ - K * S * K.transpose();
   NIS_radar_ = z.transpose() * S.inverse() * z;
